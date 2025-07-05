@@ -1,6 +1,6 @@
-"""Dash XAU/USDT liquidity heatmap with candlestick overlay.
+"""Dash BTC/USDT liquidity heatmap with candlestick overlay.
 
-This script fetches the Binance order book for XAU/USDT using ``ccxt``. Each
+This script fetches the Binance order book for BTC/USDT using ``ccxt``. Each
 snapshot is stored in Redis so that historical liquidity can be visualised as a
 heatmap. A candlestick trace of the mid price is overlaid on top of the
 heatmap. A dropdown allows selection of resampling timeframes.
@@ -35,7 +35,7 @@ redis_client = redis.Redis(host="localhost", port=6379, db=0)
 STEP = 0.5  # price increment in USD
 RANGE = 100  # number of steps above/below mid price
 MAX_HISTORY = 500
-SYMBOL = "XAU/USDT"
+SYMBOL = "BTC/USDT"
 
 price_levels: list[float] | None = None
 
@@ -70,7 +70,7 @@ def fetch_orderbook_loop() -> None:
                 raise RuntimeError("ccxt not available")
         except Exception as exc:  # noqa: PERF203
             print("Fetch error:", exc)
-            mid = float(redis_client.get("xau_last_price") or 2000)
+            mid = float(redis_client.get("btc_last_price") or 2000)
             bids = [[mid - STEP * i, random.uniform(0.1, 1)] for i in range(1, RANGE)]
             asks = [[mid + STEP * i, random.uniform(0.1, 1)] for i in range(1, RANGE)]
 
@@ -80,7 +80,7 @@ def fetch_orderbook_loop() -> None:
 
         if price_levels is None:
             price_levels = [mid_price + STEP * i for i in range(-RANGE, RANGE + 1)]
-            redis_client.set("xau_price_levels", json.dumps(price_levels))
+            redis_client.set("btc_price_levels", json.dumps(price_levels))
         levels = price_levels
 
         volume = [0.0 for _ in levels]
@@ -91,17 +91,17 @@ def fetch_orderbook_loop() -> None:
 
         ts = datetime.now(timezone.utc).isoformat()
         snap = [ts, mid_price] + volume
-        redis_client.rpush("xau_heatmap_history", json.dumps(snap))
-        redis_client.ltrim("xau_heatmap_history", -MAX_HISTORY, -1)
-        redis_client.set("xau_last_bid", bid_price)
-        redis_client.set("xau_last_ask", ask_price)
-        redis_client.set("xau_last_price", mid_price)
+        redis_client.rpush("btc_heatmap_history", json.dumps(snap))
+        redis_client.ltrim("btc_heatmap_history", -MAX_HISTORY, -1)
+        redis_client.set("btc_last_bid", bid_price)
+        redis_client.set("btc_last_ask", ask_price)
+        redis_client.set("btc_last_price", mid_price)
         time.sleep(5)
 
 
 def fetch_history() -> tuple[list[list], list[float]]:
-    rows = [json.loads(x) for x in redis_client.lrange("xau_heatmap_history", 0, -1)]
-    levels_raw = redis_client.get("xau_price_levels")
+    rows = [json.loads(x) for x in redis_client.lrange("btc_heatmap_history", 0, -1)]
+    levels_raw = redis_client.get("btc_price_levels")
     levels = json.loads(levels_raw) if levels_raw else []
     return rows, levels
 
@@ -153,7 +153,7 @@ def make_figure(tf: str) -> go.Figure:
 app = dash.Dash(__name__)
 app.layout = html.Div(
     [
-        html.H1("XAU/USDT Liquidity Heatmap"),
+        html.H1("BTC/USDT Liquidity Heatmap"),
         dcc.Dropdown(id="timeframe", options=[{"label": tf, "value": tf} for tf in TIMEFRAMES], value="1m", clearable=False),
         dcc.Graph(id="heatmap"),
         html.Div(id="bid-ask"),
@@ -165,9 +165,9 @@ app.layout = html.Div(
 @app.callback(Output("heatmap", "figure"), Output("bid-ask", "children"), Input("interval", "n_intervals"), Input("timeframe", "value"))
 def update_dashboard(_, timeframe):
     fig = make_figure(timeframe)
-    bid = redis_client.get("xau_last_bid")
-    ask = redis_client.get("xau_last_ask")
-    price = redis_client.get("xau_last_price")
+    bid = redis_client.get("btc_last_bid")
+    ask = redis_client.get("btc_last_ask")
+    price = redis_client.get("btc_last_price")
     if bid and ask and price:
         info = f"Bid: {float(bid):.2f}  Ask: {float(ask):.2f}  Price: {float(price):.2f}"
     else:
