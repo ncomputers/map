@@ -1,116 +1,120 @@
 # Python script to fetch order book data from Binance and display a liquidity heatmap using Dash.
 
+
+"""Dashboard to show a BTCUSDT liquidity heatmap using real Binance data."""
+
 import asyncio
-import random
-import time
+import json
+import threading
 from datetime import datetime
 
 import dash
 from dash import dcc, html
 from dash.dependencies import Output, Input
-import plotly.graph_objs as go
-import numpy as np
 import pandas as pd
+import plotly.graph_objs as go
+import redis
+import websockets
 
-import ccxt
 
+symbol = "btcusdt"
+stream_url = f"wss://stream.binance.com:9443/ws/{symbol}@depth@100ms"
+redis_client = redis.Redis(host="localhost", port=6379, db=0)
 
-# Attempt to create a Binance exchange instance
-try:
-    binance = ccxt.binance()
-except Exception:
-    binance = None
-
-symbol = "XAU/USDT"
 price_levels = None
-history = []
-MAX_HISTORY = 120  # keep last 120 snapshots
-STEP = 0.5         # price increment for bins
+MAX_HISTORY = 120  # last 120 snapshots
+STEP = 10.0        # $10 price bins for BTCUSDT
 
 
-def simulate_order_book():
-    """Generate simulated order book data when Binance is unreachable."""
-    mid = random.uniform(2300, 2400)
-    bids = [[mid - i * STEP, random.uniform(1, 20)] for i in range(50)]
-    asks = [[mid + i * STEP, random.uniform(1, 20)] for i in range(50)]
-    return bids, asks
-
-
-def fetch_order_book():
-    """Fetch order book from Binance or return simulated data on failure."""
-    if binance is None:
-        return simulate_order_book()
-    try:
-        ob = binance.fetch_order_book(symbol)
-        return ob['bids'], ob['asks']
-    except Exception:
-        return simulate_order_book()
-
-
-def update_history():
+async def listen_order_book():
+    """Listen to Binance websocket and store snapshots in Redis."""
     global price_levels
-    bids, asks = fetch_order_book()
-    if not bids or not asks:
-        return 0, 0
+    async with websockets.connect(stream_url) as ws:
+        async for message in ws:
+            data = json.loads(message)
+            bids = [(float(p), float(a)) for p, a in data.get("b", [])]
+            asks = [(float(p), float(a)) for p, a in data.get("a", [])]
+            if not bids or not asks:
+                continue
 
-    bid_price, _ = bids[0]
-    ask_price, _ = asks[0]
+            bid_price = bids[0][0]
+            ask_price = asks[0][0]
 
-    if price_levels is None:
-        mid = (bid_price + ask_price) / 2
-        levels = [mid + STEP * i for i in range(-40, 41)]
-        price_levels = levels
-    else:
-        levels = price_levels
+            if price_levels is None:
+                mid = (bid_price + ask_price) / 2
+                levels = [mid + STEP * i for i in range(-40, 41)]
+                price_levels = levels
+                redis_client.set("price_levels", json.dumps(levels))
+            else:
+                levels = price_levels
 
-    volume_at_levels = [0.0 for _ in levels]
-    for price, amount in bids + asks:
-        idx = int(round((price - levels[0]) / STEP))
-        if 0 <= idx < len(levels):
-            volume_at_levels[idx] += amount
+            volume = [0.0 for _ in levels]
+            for price, amount in bids + asks:
+                idx = int(round((price - levels[0]) / STEP))
+                if 0 <= idx < len(levels):
+                    volume[idx] += amount
 
-    timestamp = datetime.utcnow().strftime('%H:%M:%S')
-    history.append([timestamp] + volume_at_levels)
-    if len(history) > MAX_HISTORY:
-        history.pop(0)
+            timestamp = datetime.utcnow().strftime("%H:%M:%S")
+            snapshot = [timestamp] + volume
+            redis_client.rpush("heatmap_history", json.dumps(snapshot))
+            redis_client.ltrim("heatmap_history", -MAX_HISTORY, -1)
+            redis_client.set("last_bid", bid_price)
+            redis_client.set("last_ask", ask_price)
 
-    return bid_price, ask_price
+
+def fetch_history():
+    data = [json.loads(x) for x in redis_client.lrange("heatmap_history", 0, -1)]
+    levels_raw = redis_client.get("price_levels")
+    levels = json.loads(levels_raw) if levels_raw else []
+    return data, levels
 
 
 def make_figure():
-    if not history:
+    history, levels = fetch_history()
+    if not history or not levels:
         return go.Figure()
-    df = pd.DataFrame(history, columns=['time'] + price_levels)
+    df = pd.DataFrame(history, columns=["time"] + levels)
     z = df.iloc[:, 1:].values.T
-    fig = go.Figure(data=go.Heatmap(
-        z=z,
-        x=df['time'],
-        y=price_levels,
-        colorscale='Viridis'))
-    fig.update_layout(xaxis_title='Time', yaxis_title='Price')
+    fig = go.Figure(
+        data=go.Heatmap(z=z, x=df["time"], y=levels, colorscale="Viridis")
+    )
+    fig.update_layout(xaxis_title="Time", yaxis_title="Price")
     return fig
 
 
 app = dash.Dash(__name__)
-app.layout = html.Div([
-    html.H1("XAUUSD Liquidity Heatmap"),
-    dcc.Graph(id='heatmap'),
-    html.Div(id='bid-ask'),
-    dcc.Interval(id='interval', interval=5000, n_intervals=0)
-])
+app.layout = html.Div(
+    [
+        html.H1("BTCUSDT Liquidity Heatmap"),
+        dcc.Graph(id="heatmap"),
+        html.Div(id="bid-ask"),
+        dcc.Interval(id="interval", interval=5000, n_intervals=0),
+    ]
+)
 
 
 @app.callback(
-    [Output('heatmap', 'figure'), Output('bid-ask', 'children')],
-    [Input('interval', 'n_intervals')]
+    [Output("heatmap", "figure"), Output("bid-ask", "children")],
+    [Input("interval", "n_intervals")],
 )
 def update_dashboard(n):
-    bid, ask = update_history()
     fig = make_figure()
-    bid_ask_text = f"Bid: {bid:.2f} Ask: {ask:.2f}"
+    bid = redis_client.get("last_bid")
+    ask = redis_client.get("last_ask")
+    if bid and ask:
+        bid_ask_text = f"Bid: {float(bid):.2f} Ask: {float(ask):.2f}"
+    else:
+        bid_ask_text = "No data"
     return fig, bid_ask_text
 
 
-if __name__ == '__main__':
-    # Dash 3 uses app.run instead of the deprecated run_server
-    app.run(debug=False)
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever)
+    thread.start()
+    asyncio.run_coroutine_threadsafe(listen_order_book(), loop)
+    try:
+        app.run(debug=False)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
