@@ -6,6 +6,12 @@ heatmap. A candlestick trace of the mid price is overlaid on top of the
 heatmap. A dropdown allows selection of resampling timeframes.
 
 Running this file launches a Dash application with ``app.run`` on port 8051.
+
+Environment variables
+---------------------
+``REDIS_HOST`` -- hostname of the Redis server (default ``localhost``)
+``REDIS_PORT`` -- port of the Redis server (default ``6379``)
+``REDIS_DB``   -- Redis database number (default ``0``)
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import random
 import threading
 import time
 from datetime import datetime, timezone
+import os
 
 import dash
 from dash import dcc, html
@@ -28,8 +35,11 @@ try:  # pragma: no cover - ccxt may be missing
 except Exception:  # pragma: no cover - optional dep
     ccxt = None
 
-# Redis connection
-redis_client = redis.Redis(host="localhost", port=6379, db=0)
+# Redis connection configured via environment variables
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 # Heatmap parameters
 STEP = 0.5  # price increment in USD
